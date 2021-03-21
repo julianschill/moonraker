@@ -441,7 +441,7 @@ class FileManager:
     def _unzip_ufp(self, ufp_path, dest_path):
         thumb_name = os.path.splitext(
             os.path.basename(dest_path))[0] + ".png"
-        dest_thumb_dir = os.path.join(os.path.dirname(dest_path), "thumbs")
+        dest_thumb_dir = os.path.join(os.path.dirname(dest_path), ".thumbs")
         dest_thumb_path = os.path.join(dest_thumb_dir, thumb_name)
         try:
             with tempfile.TemporaryDirectory() as tmp_dir_name:
@@ -924,11 +924,12 @@ class INotifyHandler:
 
 
 METADATA_NAMESPACE = "gcode_metadata"
-METADATA_VERSION = 3
+METADATA_VERSION = 4
 
 class MetadataStorage:
     def __init__(self, server, gc_path, database):
         self.server = server
+        self.gc_path = gc_path
         database.register_local_namespace(METADATA_NAMESPACE)
         self.mddb = database.wrap_namespace(
             METADATA_NAMESPACE, parse_keys=False)
@@ -936,14 +937,14 @@ class MetadataStorage:
             "moonraker", "file_manager.metadata_version", 0)
         if version != METADATA_VERSION:
             # Clear existing metadata when version is bumped
-            self.mddb.clear()
+            for fname in self.mddb.keys():
+                self.remove_file_metadata(fname)
             database.insert_item(
                 "moonraker", "file_manager.metadata_version",
                 METADATA_VERSION)
         self.pending_requests = {}
         self.events = {}
         self.busy = False
-        self.gc_path = gc_path
         if self.gc_path:
             # Check for removed gcode files while moonraker was shutdown
             for fname in list(self.mddb.keys()):
