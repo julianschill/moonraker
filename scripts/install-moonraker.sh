@@ -7,6 +7,7 @@ SYSTEMDDIR="/etc/systemd/system"
 REBUILD_ENV="n"
 FORCE_DEFAULTS="n"
 CONFIG_PATH="${HOME}/moonraker.conf"
+LOG_PATH="/tmp/moonraker.log"
 
 # Step 1:  Verify Klipper has been installed
 check_klipper()
@@ -36,11 +37,11 @@ cleanup_legacy() {
 install_packages()
 {
     PKGLIST="python3-virtualenv python3-dev nginx libopenjp2-7 python3-libgpiod"
-    PKGLIST="${PKGLIST} liblmdb0 rsync zlib1g-dev"
+    PKGLIST="${PKGLIST} liblmdb0 libsodium-dev zlib1g-dev"
 
     # Update system package info
     report_status "Running apt-get update..."
-    sudo apt-get update
+    sudo apt-get update --allow-releaseinfo-change
 
     # Install desired packages
     report_status "Installing packages..."
@@ -60,7 +61,6 @@ create_virtualenv()
 
     if [ ! -d ${PYTHONDIR} ]; then
         virtualenv -p /usr/bin/python3 ${PYTHONDIR}
-        ln -s /usr/lib/python3/dist-packages/gpiod* ${PYTHONDIR}/lib/python*/site-packages
     fi
 
     # Install/update dependencies
@@ -77,7 +77,7 @@ install_script()
     sudo /bin/sh -c "cat > ${SERVICE_FILE}" << EOF
 #Systemd service file for moonraker
 [Unit]
-Description=Starts Moonraker on startup
+Description=API Server for Klipper
 After=network.target
 
 [Install]
@@ -87,12 +87,14 @@ WantedBy=multi-user.target
 Type=simple
 User=$USER
 RemainAfterExit=yes
-ExecStart=${PYTHONDIR}/bin/python ${SRCDIR}/moonraker/moonraker.py -c ${CONFIG_PATH}
+WorkingDirectory=${SRCDIR}
+ExecStart=${LAUNCH_CMD} -c ${CONFIG_PATH} -l ${LOG_PATH}
 Restart=always
 RestartSec=10
 EOF
 # Use systemctl to enable the klipper systemd service script
     sudo systemctl enable moonraker.service
+    sudo systemctl daemon-reload
 }
 
 
@@ -124,13 +126,15 @@ set -e
 
 # Find SRCDIR from the pathname of this script
 SRCDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )"/.. && pwd )"
+LAUNCH_CMD="${PYTHONDIR}/bin/python ${SRCDIR}/moonraker/moonraker.py"
 
 # Parse command line arguments
-while getopts "rfc:" arg; do
+while getopts "rfc:l:" arg; do
     case $arg in
         r) REBUILD_ENV="y";;
         f) FORCE_DEFAULTS="y";;
         c) CONFIG_PATH=$OPTARG;;
+        l) LOG_PATH=$OPTARG;;
     esac
 done
 

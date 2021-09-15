@@ -20,6 +20,16 @@ host: 0.0.0.0
 #  to all interfaces
 port: 7125
 #   The port the HTTP server will listen on.  Default is 7125
+ssl_port: 7130
+#   The port to listen on for SSS (HTTPS) connections.  Note that the HTTPS
+#   server will only be started of the certificate and key options outlined
+#   below are provied.  The default is 7130.
+ssl_certificate_path:
+#   The path to a self signed ssl certificate.  The default is no path, which
+#   disables HTTPS.
+ssl_key_path:
+#   The path to the private key used to signed the certificate.  The default
+#   is no path, which disables HTTPS.
 klippy_uds_address: /tmp/klippy_uds
 #   The address of Unix Domain Socket used to communicate with Klippy. Default
 #   is /tmp/klippy_uds
@@ -41,6 +51,10 @@ database_path: ~/.moonraker_database
 #   Moonraker (such as the "config_path" or the location where gcode
 #   files are stored).  If the folder does not exist an attempt will be made
 #   to create it.  The default is ~/.moonraker_database.
+log_path:
+#   An optional path to a directory where log files are located.  Users may
+#   configure various applications to store logs here and Moonraker will serve
+#   them at "/server/files/logs/*".  The default is no log paths.
 enable_database_debug: False
 #   For developer use only.  End users should leave this option set to False.
 temperature_store_size: 1200
@@ -94,6 +108,11 @@ cors_domains:
 #   When CORS is enabled by adding an entry to this option, all origins
 #   matching the "trusted_clients" option will have CORS headers set as
 #   well.  If this option is not specified then CORS is disabled.
+force_logins: False
+#   When set to True a user login is required for authorization if at least
+#   one user has been created, overriding the "trusted_clients" configuration.
+#   If no users have been created then trusted client checks will apply.
+#   The default is False.
 ```
 
 ## `[octoprint_compat]`
@@ -180,7 +199,7 @@ and Tasmota (via http) devices, HomeAssistant switch are supported.
 [power device_name]
 type: gpio
 #   The type of device.  Can be either gpio, tplink_smartplug, tasmota
-#   or homeseer.
+#   shelly, homeseer, homeassistant, or loxonev1.
 #   This parameter must be provided.
 off_when_shutdown: False
 #   If set to True the device will be powered off when Klipper enters
@@ -241,10 +260,10 @@ timer:
 #   Provide a user and password if configured in Shelly (default is empty).
 #   If password is set but user is empty the default user "admin" will be used
 #   Provided an output_id (relay id) if the Shelly device supports
-#   more than one (default is 0).
-#   When timer option is used to delay the turn off make sure to set
-#   the state to "on" in action call_remote_method.
-#   So we send a command to turn it on for x sec when its already on then it turns off.
+#   more than one (default is 0). When timer option is used to delay the turn
+#   off make sure to set the state to "on" in action call_remote_method.
+#   So we send a command to turn it on for x sec when its already on then
+#   it turns off.
 address:
 device:
 user:
@@ -262,10 +281,22 @@ address:
 port:
 device:
 token:
+domain:
 #   The above options are used for "homeassistant" devices.  The
 #   address should be a valid ip or hostname for the homeassistant controller.
 #   "device" should be the ID of the switch to control.
-
+#   "domain" is the class of device set managed by homeassistant, defaults to "switch".
+address:
+user:
+password:
+output_id:
+#   The above options are used for "loxone smart home miniserver v1 " devices.
+#   The address should be a valid ip or hostname for the loxone miniserver v1
+#   device. All entries must be configured in advance in the loxone config.
+#   Provide a user and password configured in loxone config.
+#   The output_id is the name of a programmed output, virtual input or virtual
+#   output in the loxone config his output_id (name) may only be used once in
+#   the loxone config
 ```
 Below are some potential examples:
 ```ini
@@ -308,6 +339,7 @@ address: 192.168.1.126
 port: 8123
 device: switch.1234567890abcdefghij
 token: home-assistant-very-long-token
+domain: switch
 ```
 
 It is possible to toggle device power from the Klippy host, this can be done
@@ -336,7 +368,7 @@ gcode:
 
 [idle_timeout]
 gcode:
-  TURN_OFF_MOTORS
+  M84
   TURN_OFF_HEATERS
   UPDATE_DELAYED_GCODE ID=delayed_printer_off DURATION=60
 ```
@@ -362,10 +394,22 @@ enable_auto_refresh: False
 #   When set to False Moonraker will only fetch update state on startup
 #   and clients will need to request that Moonraker updates state.  The
 #   default is False.
-distro: debian
-#   The disto in which moonraker has been installed.  Currently the
-#   update manager only supports "debian", which encompasses all of
-#   its derivatives.  The default is debain.
+enable_system_updates: True
+#   A boolean value that can be used to toggle system package updates.
+#   Currently Moonraker only supports updating packages via APT, so
+#   this option is useful for users that wish to experiment with linux
+#   distros that use other package management applications, or users
+#   that prefer to manage their packages directly.  Note that if this
+#   is set to False users will be need to make sure that all system
+#   dependencies are up to date.  The default is True.
+channel: dev
+#   The update channel applied to Klipper and Moonraker.  May be 'dev'
+#   which will fetch updates using git, or 'beta' which will fetch
+#   zipped beta releases.  Note that this channel does not apply to
+#   client updates, a client's update channel is determined by its
+#   'type' option.  When this option is changed the next "update" will
+#   swap channels, any untracked files in the application's path will be
+#   removed during this process.  The default is dev.
 ```
 
 ### Client Configuration
@@ -373,15 +417,17 @@ This allows client programs such as Fluidd, KlipperScreen, and Mainsail to be
 updated in addition to klipper, moonraker, and the system os. Repos that have
 been modified or cloned from unofficial sources are not supported.
 
-There are two types of update manager clients and each will be detailed
-separately. The first one is targeted towards releases that do not need a
-service restart such as Fluidd/Mainsail.
+Moonraker supports updates for "application" based clients and "web" based
+clients. Each are detailed separately below.
 
 ```ini
 # moonraker.conf
 
-[update_manager client client_name]
+[update_manager client_name]
 type: web
+#   The client type.  For web clients this should be 'web', or 'web_beta'.
+#   The 'web_beta' type will enable updates for releases tagged with
+#   "prerelease" on GitHub.  This parameter must be provided.
 repo:
 #   This is the GitHub repo of the client, in the format of user/client.
 #   For example, this could be set to cadriel/fluidd to update Fluidd or
@@ -394,21 +440,29 @@ persistent_files:
 #   themes.  The default is no persistent files.
 ```
 
-This second example is for git repositories that have a service that need
-updating.
+This second example is for "applications".  These may be git repositories
+or zipped distributions.
+
+Note that git repos must have at least one tag for Moonraker
+to identify its version.
 
 ```ini
 # moonraker.conf
 
 # service_name must be the name of the systemd service
-[update_manager client service_name]
+[update_manager service_name]
 type: git_repo
+#   Can be git_repo, zip, or zip_beta.  See your the client's documentation
+#   for recommendations on which value to use.  Generally a git_repo is
+#   an applications "dev" channel, zip_beta is its "beta" channel, and zip
+#   is its "stable" channel.  This parameter must be provided.
 path:
-#   The absolute path to the client's files on disk. This parameter must be provided.
+#   The absolute path to the client's files on disk. This parameter must be
+#   provided.
 #   Example:
 #     path: ~/service_name
 origin:
-#   The full GitHub URL of the "origin" remote for the repository.  This can
+#   The full git URL of the "origin" remote for the repository.  This can
 #   be be viewed by navigating to your repository and running:
 #     git remote -v
 #   This parameter must be provided.
@@ -435,4 +489,74 @@ enable_node_updates:
 #   to package-lock.json.  Note that if your project does not have a
 #   package-lock.json in its root directory then the plugin will fail to load.
 #   Default is False.
+host_repo:
+#   The GitHub repo in which zipped releases are hosted.  Note that this does
+#   not need to match the repository in the "origin" option, as it is possible
+#   to use a central GitHub repository to host multiple client builds.  As
+#   an example, Moonraker's repo hosts builds for both Moonraker and Klipper.
+#   This option defaults to the repo extracted from the "origin" option,
+#   however if the origin is not hosted on GitHub then this parameter must
+#   be provided.
+is_system_service: True
+#   If set to true the update manager will attempt to use systemctl to restart
+#   the service after an update has completed.  This can be set to flase for
+#   repos that are not installed as a service.  The default is True.
+```
+
+## `[mqtt]`
+
+Enables an MQTT Client.  When configured most of Moonraker's APIs are availble
+by publishing JSON-RPC requests to `{instance_name}/moonraker/api/request`.
+Responses will be published to `{instance_name}/moonraker/api/response`. See
+the [API Documentation](web_api.md#json-rpc-api-overview) for details on
+on JSON-RPC.
+
+It is also possible for other components within Moonraker to use MQTT to
+publish and subscribe to topics.
+
+```ini
+[mqtt]
+address:
+#   Address of the Broker.  This may be a hostname or IP Address.  This
+#   parameter must be provided.
+port:
+#   Port the Broker is listening on.  Default is 1883.
+username:
+#   An optional username used to log in to the Broker.  Default is no
+#   username (an anonymous login will be attempted)
+password_file:
+#   An optional path to a text file containing a password used to log in
+#   to the broker.  It is strongly recommended that this file be located
+#   in a folder not served by Moonraker.  It is also recommended that the
+#   password be unique and not used for other logins, as it is stored in
+#   plain text.  To create a password file, one may ssh in to the device
+#   and enter the following commands:
+#      cd ~
+#      echo mypassword > .mqttpass
+#   Then set this option to:
+#     ~/.mqttpass
+#   If this option is omitted no password will be used to login.
+mqtt_protocol: v3.1.1
+#   The protocol to use when connecting to the Broker.  May be v3.1,
+#   v3.1.1, and v5.  The default is v3.1.1
+enable_moonraker_api: True
+#   If set to true the MQTT client will subscribe to API topic, ie:
+#     {instance_name}/moonraker/api/request
+#   This can be set to False if the user does not wish to allow API
+#   requests over MQTT.  The default is True.
+instance_name:
+#   An identifer used to create unique API topics for each instance of
+#   Moonraker on network.  This name cannot contain wildcards (+ or #).
+#   For example, if the instance name is set to my_printer, Moonraker
+#   will subscribe to the following topic for API requests:
+#     my_printer/moonraker/api/request
+#   Responses will be published to the following topic:
+#     my_printer/moonraker/api/response
+#   The default is the machine's hostname.
+default_qos: 0
+#   The default QOS level used when publishing or subscribing to topics.
+#   Must be an integer value from 0 to 2.  The default is 0.
+api_qos:
+#   The QOS level to use for the API topics. If not provided, the
+#   value specified by "default_qos" will be used.
 ```

@@ -3,15 +3,32 @@
 # Copyright (C) 2020 Eric Callahan <arksine.code@gmail.com>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+
+from __future__ import annotations
 import os
 import re
 import pathlib
 import logging
 import platform
 import distro
-from tornado.ioloop import IOLoop
 
-ALLOWED_SERVICES = ["moonraker", "klipper", "webcamd"]
+# Annotation imports
+from typing import (
+    List,
+    TYPE_CHECKING,
+    Any,
+    Dict,
+)
+if TYPE_CHECKING:
+    from confighelper import ConfigHelper
+    from websockets import WebRequest
+    from . import shell_command
+    SCMDComp = shell_command.ShellCommandFactory
+
+ALLOWED_SERVICES = [
+    "moonraker", "klipper", "webcamd", "MoonCord",
+    "KlipperScreen"]
+SYSTEMD_PATH = "/etc/systemd/system"
 SD_CID_PATH = "/sys/block/mmcblk0/device/cid"
 SD_CSD_PATH = "/sys/block/mmcblk0/device/csd"
 SD_MFGRS = {
@@ -20,11 +37,12 @@ SD_MFGRS = {
 }
 
 class Machine:
-    def __init__(self, config):
+    def __init__(self, config: ConfigHelper) -> None:
         self.server = config.get_server()
+        dist_info: Dict[str, Any]
         dist_info = {'name': distro.name(pretty=True)}
         dist_info.update(distro.info())
-        self.system_info = {
+        self.system_info: Dict[str, Any] = {
             'cpu_info': self._get_cpu_info(),
             'sd_info': self._get_sdcard_info(),
             'distribution': dist_info
@@ -36,6 +54,7 @@ class Machine:
             for key, val in info.items():
                 sys_info_msg += f"\n  {key}: {val}"
         self.server.add_log_rollover_item('system_info', sys_info_msg)
+        self.available_services: List[str] = []
 
         self.server.register_endpoint(
             "/machine/reboot", ['POST'], self._handle_machine_request)
@@ -60,7 +79,11 @@ class Machine:
         self.server.register_remote_method(
             "reboot_machine", self.reboot_machine)
 
-    async def _handle_machine_request(self, web_request):
+        # Retreive list of services
+        event_loop = self.server.get_event_loop()
+        event_loop.register_callback(self._find_active_services)
+
+    async def _handle_machine_request(self, web_request: WebRequest) -> str:
         ep = web_request.get_endpoint()
         if ep == "/machine/shutdown":
             await self.shutdown_machine()
@@ -70,49 +93,57 @@ class Machine:
             raise self.server.error("Unsupported machine request")
         return "ok"
 
-    async def shutdown_machine(self):
+    async def shutdown_machine(self) -> None:
         await self._execute_cmd("sudo shutdown now")
 
-    async def reboot_machine(self):
+    async def reboot_machine(self) -> None:
         await self._execute_cmd("sudo shutdown -r now")
 
-    async def do_service_action(self, action, service_name):
+    async def do_service_action(self,
+                                action: str,
+                                service_name: str
+                                ) -> None:
         await self._execute_cmd(
             f'sudo systemctl {action} {service_name}')
 
-    async def _handle_service_request(self, web_request):
-        name = web_request.get('service').lower()
+    async def _handle_service_request(self, web_request: WebRequest) -> str:
+        name: str = web_request.get('service')
         action = web_request.get_endpoint().split('/')[-1]
         if name == "moonraker":
             if action != "restart":
                 raise self.server.error(
                     f"Service action '{action}' not available for moonraker")
-            IOLoop.current().spawn_callback(
-                self.do_service_action, action, name)
-        elif name in ALLOWED_SERVICES:
+            event_loop = self.server.get_event_loop()
+            event_loop.register_callback(self.do_service_action, action, name)
+        elif name in self.available_services:
             await self.do_service_action(action, name)
         else:
+            if name in ALLOWED_SERVICES and \
+                    name not in self.available_services:
+                raise self.server.error(f"Service '{name}' not installed")
             raise self.server.error(
-                f"Invalid argument recevied for 'name': {name}")
+                f"Service '{name}' not allowed")
         return "ok"
 
-    async def _handle_sysinfo_request(self, web_request):
+    async def _handle_sysinfo_request(self,
+                                      web_request: WebRequest
+                                      ) -> Dict[str, Any]:
         return {'system_info': self.system_info}
 
-    async def _execute_cmd(self, cmd):
-        shell_command = self.server.lookup_component('shell_command')
-        scmd = shell_command.build_shell_command(cmd, None)
+    async def _execute_cmd(self, cmd: str) -> None:
+        shell_cmd: SCMDComp = self.server.lookup_component('shell_command')
+        scmd = shell_cmd.build_shell_command(cmd, None)
         try:
             await scmd.run(timeout=2., verbose=False)
         except Exception:
             logging.exception(f"Error running cmd '{cmd}'")
             raise
 
-    def get_system_info(self):
+    def get_system_info(self) -> Dict[str, Dict[str, Any]]:
         return self.system_info
 
-    def _get_sdcard_info(self):
-        sd_info = {}
+    def _get_sdcard_info(self) -> Dict[str, Any]:
+        sd_info: Dict[str, Any] = {}
         cid_file = pathlib.Path(SD_CID_PATH)
         if not cid_file.exists():
             # No SDCard detected at mmcblk0
@@ -143,12 +174,12 @@ class Machine:
             csd_type = (csd_reg[0] >> 6) & 0x3
             if csd_type == 0:
                 # Standard Capacity (CSD Version 1.0)
-                max_block_len = 2**(csd_reg[5] & 0xF)
+                max_block_len: int = 2**(csd_reg[5] & 0xF)
                 c_size = ((csd_reg[6] & 0x3) << 10) | (csd_reg[7] << 2) | \
                     ((csd_reg[8] >> 6) & 0x3)
                 c_mult_reg = ((csd_reg[9] & 0x3) << 1) | (csd_reg[10] >> 7)
                 c_mult = 2**(c_mult_reg + 2)
-                total_bytes = (c_size + 1) * c_mult * max_block_len
+                total_bytes: int = (c_size + 1) * c_mult * max_block_len
                 sd_info['capacity'] = f"{(total_bytes / (1024.0**2)):.1f} MiB"
             elif csd_type == 1:
                 # High Capacity (CSD Version 2.0)
@@ -170,36 +201,69 @@ class Machine:
             logging.info("Error Reading SDCard CSD Register")
         return sd_info
 
-    def _get_cpu_info(self):
+    def _get_cpu_info(self) -> Dict[str, Any]:
         cpu_file = pathlib.Path("/proc/cpuinfo")
+        mem_file = pathlib.Path("/proc/meminfo")
         cpu_info = {
             'cpu_count': os.cpu_count(),
             'bits': platform.architecture()[0],
             'processor': platform.processor() or platform.machine(),
             'cpu_desc': "",
             'hardware_desc': "",
-            'model': ""
+            'model': "",
+            'total_memory': None,
+            'memory_units': ""
         }
-        if not cpu_file.exists():
-            return cpu_info
-        try:
-            cpu_text = cpu_file.read_text().strip()
-            cpu_items = [item.strip() for item in cpu_text.split("\n\n")
-                         if item.strip()]
-            for item in cpu_items:
-                cpu_desc_match = re.search(r"model name\s+:\s+(.+)", item)
-                if cpu_desc_match is not None:
-                    cpu_info['cpu_desc'] = cpu_desc_match.group(1).strip()
-                    continue
-            hw_match = re.search(r"Hardware\s+:\s+(.+)", cpu_items[-1])
-            if hw_match is not None:
-                cpu_info['hardware_desc'] = hw_match.group(1).strip()
-            model_match = re.search(r"Model\s+:\s+(.+)", cpu_items[-1])
-            if model_match is not None:
-                cpu_info['model'] = model_match.group(1).strip()
-        except Exception:
-            logging.info("Error Reading /proc/cpuinfo")
+        if cpu_file.exists():
+            try:
+                cpu_text = cpu_file.read_text().strip()
+                cpu_items = [item.strip() for item in cpu_text.split("\n\n")
+                             if item.strip()]
+                for item in cpu_items:
+                    cpu_desc_match = re.search(r"model name\s+:\s+(.+)", item)
+                    if cpu_desc_match is not None:
+                        cpu_info['cpu_desc'] = cpu_desc_match.group(1).strip()
+                        continue
+                hw_match = re.search(r"Hardware\s+:\s+(.+)", cpu_items[-1])
+                if hw_match is not None:
+                    cpu_info['hardware_desc'] = hw_match.group(1).strip()
+                model_match = re.search(r"Model\s+:\s+(.+)", cpu_items[-1])
+                if model_match is not None:
+                    cpu_info['model'] = model_match.group(1).strip()
+            except Exception:
+                logging.info("Error Reading /proc/cpuinfo")
+        if mem_file.exists():
+            try:
+                mem_text = mem_file.read_text().strip()
+                for line in mem_text.split('\n'):
+                    line = line.strip()
+                    if line.startswith("MemTotal:"):
+                        parts = line.split()
+                        cpu_info['total_memory'] = int(parts[1])
+                        cpu_info['memory_units'] = parts[2]
+                        break
+            except Exception:
+                logging.info("Error Reading /proc/meminfo")
         return cpu_info
 
-def load_component(config):
+    async def _find_active_services(self):
+        shell_cmd: SCMDComp = self.server.lookup_component('shell_command')
+        scmd = shell_cmd.build_shell_command(
+            "systemctl list-units --type=service")
+        try:
+            resp = await scmd.run_with_response()
+            lines = resp.split('\n')
+            services = [line.split()[0].strip() for line in lines
+                        if ".service" in line.strip()]
+        except Exception:
+            services = []
+        for svc in services:
+            sname = svc.rsplit('.', 1)[0]
+            for allowed in ALLOWED_SERVICES:
+                if sname.startswith(allowed):
+                    self.available_services.append(sname)
+        self.system_info['available_services'] = self.available_services
+
+
+def load_component(config: ConfigHelper) -> Machine:
     return Machine(config)

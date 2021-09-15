@@ -1,10 +1,10 @@
 #
 
-Most API methods are supported over both the Websocket and HTTP transports.
-File Transfer and `/access` requests are only available over HTTP. The
-Websocket is required to receive server generated events such as gcode
-responses.  For information on how to set up the Websocket, please see the
-Appendix at the end of this document.
+Most API methods are supported over the Websocket, HTTP, and MQTT
+(if configured) transports. File Transfer and `/access` requests are only
+available over HTTP. The Websocket is required to receive server generated
+events such as gcode responses.  For information on how to set up the
+Websocket, please see the Appendix at the end of this document.
 
 ### HTTP API Overview
 
@@ -71,10 +71,19 @@ thus using this functionality should be seen as a "last resort."  If at
 all possible clients should attempt to put these arguments in the body
 of a request.
 
-### Websocket API Overview
+### JSON-RPC API Overview
 
-The Websocket API is based on JSON-RPC, an encoded request should look
-something like:
+The Websocket and MQTT transports use the [JSON-RPC 2.0](https://jsonrpc.org)
+protocol.  The Websocket transmits objects in a text frame,  whereas MQTT
+transmits them in the payload of a topic.  When MQTT is configured Moonraker
+subscribes to an api request topic. After an api request is processed Moonraker
+publishes the return value to a response topic. By default these topics are
+`{instance_name}/moonraker/api/request` and
+`{instance_name}/moonraker/api/response`.  The `{instance_name}` should be a
+unique identifier for each instance of Moonraker and defaults to the machine's
+host name.
+
+An encoded request should look something like:
 ```json
 {
     "jsonrpc": "2.0",
@@ -85,9 +94,18 @@ something like:
 ```
 
 The `params` field may be left out if the API request takes no arguments.
-The `id` should be a unique integer value that has no chance of colliding
+The `id` should be a unique value that has no chance of colliding
 with other JSON-RPC requests.  The `method` is the API method, as defined
 for each API in this document.
+
+!!! tip
+    MQTT requests may provide an optional `mqtt_timestamp` keyword
+    argument in the `params` field of the JSON-RPC request.  To avoid
+    potential collisions from time drift it is recommended to specify
+    the timestamp in microseconds since the Unix Epoch.  If provided
+    Moonraker will use the timestamp to discard duplicate requests.
+    It is recommended to either provide a timestamp or publish API
+    requests at a QoS level of 0 or 2.
 
 A successful request will return a response like the following:
 ```json
@@ -114,7 +132,7 @@ Some errors may not return a request ID, such as an improperly formatted request
 
 The `test/client` folder includes a basic test interface with example usage for
 most of the requests below.  It also includes a basic JSON-RPC implementation
-that uses promises to return responses and errors (see json-rcp.js).
+that uses promises to return responses and errors (see json-rpc.js).
 
 ### Printer Administration
 
@@ -303,6 +321,9 @@ POST /printer/objects/subscribe?connection_id=123456789&gcode_move&extruder`
     request that includes only the `connection_id` argument will cancel the
     subscription on the specified websocket.
 
+    This request is not available over MQTT, as it is not possible to
+    associate a connected websocket with an MQTT client.
+
 JSON-RPC request:
 ```json
 {
@@ -415,7 +436,11 @@ An object containing various fields that report server state.
         "power"
     ],
     "failed_components": [],
-    "registered_directories": ["config", "gcodes", "config_examples", "docs"]
+    "registered_directories": ["config", "gcodes", "config_examples", "docs"],
+    "warnings": [
+        "Invalid config option 'api_key_path' detected in section [authorization]. Remove the option to resolve this issue. In the future this will result in a startup error.",
+        "Unparsed config section [fake_section] detected.  This may be the result of a component that failed to load.  In the future this will result in a startup error."
+    ]
   }
 ```
 !!! warning
@@ -804,13 +829,16 @@ Returns: Information about the host system in the following format:
 ```json
 {
     "system_info": {
+        "available_services": ["moonraker", "klipper"],
         "cpu_info": {
             "cpu_count": 1,
             "bits": "32bit",
             "processor": "armv6l",
             "cpu_desc": "ARMv6-compatible processor rev 7 (v6l)",
             "hardware_desc": "BCM2835",
-            "model": "Raspberry Pi Zero W Rev 1.1"
+            "model": "Raspberry Pi Zero W Rev 1.1",
+            "total_memory": 439276,
+            "memory_units": "kB"
         },
         "sd_info": {
             "manufacturer_id": "03",
@@ -880,7 +908,8 @@ and the socket connection will drop.
 
 #### Restart a system service
 Restarts a system service via `sudo systemctl restart {name}`. Currently
-only the `moonraker`, `klipper`, and `webcamd` services are supported.
+the `moonraker`, `klipper`, `MoonCord`, `KlipperScreen` and `webcamd`
+services are supported.
 
 HTTP request:
 ```http
@@ -973,24 +1002,35 @@ An object in the following format:
 {
     "moonraker_stats": [
         {
-            "time": 1615837812.0894408,
-            "cpu_usage": 1.99,
-            "memory": 23636,
+            "time": 1626612666.850755,
+            "cpu_usage": 2.66,
+            "memory": 24732,
             "mem_units": "kB"
         },
         {
-            "time": 1615837813.0890627,
-            "cpu_usage": 2.09,
-            "memory": 23636,
+            "time": 1626612667.8521338,
+            "cpu_usage": 2.62,
+            "memory": 24732,
             "mem_units": "kB"
-        },
-        ...
+        }
     ],
     "throttled_state": {
         "bits": 0,
         "flags": []
     },
-    "cpu_temp": 46.148
+    "cpu_temp": 45.622,
+    "network": {
+        "lo": {
+            "rx_bytes": 113516429,
+            "tx_bytes": 113516429,
+            "bandwidth": 3342.68
+        },
+        "wlan0": {
+            "rx_bytes": 48471767,
+            "tx_bytes": 113430843,
+            "bandwidth": 4455.91
+        }
+    }
 }
 ```
 Process information is sampled every second.  The `moonraker_stats` field
@@ -1029,6 +1069,18 @@ may not still be active).  If `vcgencmd` is not available
 If the system reports CPU temp at `/sys/class/thermal/thermal_zone0`
 then temperature will be supplied in the `cpu_temp` field.  Otherwise
 the field will be set to `null`.
+
+If the system reports network statistics at `/proc/net/dev` then the
+`network` field will contain network statistics.  All available interfaces
+will be tracked.  Each interface reports the following fields:
+
+- `rx_bytes`: total number of bytes received over the interface
+- `tx_bytes`: total number of bytes transferred over the interface
+- `bandwidth`: estimated current bandwidth used (both rx and tx) in
+  bytes/second
+
+If network information is not available then the `network` field will
+contain an empty object.
 
 ### File Operations
 
@@ -1082,27 +1134,27 @@ A list of objects, where each object contains file data.
 ```json
 [
     {
-        "filename": "3DBenchy_0.15mm_PLA_MK3S_2h6m.gcode",
+        "path": "3DBenchy_0.15mm_PLA_MK3S_2h6m.gcode",
         "modified": 1615077020.2025201,
         "size": 4926481
     },
     {
-        "filename": "Shape-Box_0.2mm_PLA_Ender2_20m.gcode",
+        "path": "Shape-Box_0.2mm_PLA_Ender2_20m.gcode",
         "modified": 1614910966.946807,
         "size": 324236
     },
     {
-        "filename": "test_dir/A-Wing.gcode",
+        "path": "test_dir/A-Wing.gcode",
         "modified": 1605202259,
         "size": 1687387
     },
     {
-        "filename": "test_dir/CE2_CubeTest.gcode",
+        "path": "test_dir/CE2_CubeTest.gcode",
         "modified": 1614644445.4025,
         "size": 1467339
     },
     {
-        "filename": "test_dir/V350_Engine_Block_-_2_-_Scaled.gcode",
+        "path": "test_dir/V350_Engine_Block_-_2_-_Scaled.gcode",
         "modified": 1615768477.5133543,
         "size": 189713016
     },
@@ -1158,15 +1210,13 @@ modified time, and size.
             "width": 32,
             "height": 32,
             "size": 2596,
-            "data": "{base64_data}"
-            "relative_path": "thumbs/3DBenchy_0.15mm_PLA_MK3S_2h6m-32x32.png"
+            "relative_path": ".thumbs/3DBenchy_0.15mm_PLA_MK3S_2h6m-32x32.png"
         },
         {
             "width": 400,
             "height": 300,
             "size": 73308,
-            "data": "{base64_data}",
-            "relative_path": "thumbs/3DBenchy_0.15mm_PLA_MK3S_2h6m-400x300.png"
+            "relative_path": ".thumbs/3DBenchy_0.15mm_PLA_MK3S_2h6m-400x300.png"
         }
     ],
     "first_layer_bed_temp": 60,
@@ -1180,11 +1230,6 @@ modified time, and size.
     The `print_start_time` and `job_id` fields are initialized to
     `null`.  They will be updated for each print job if the user has the
     `[history]` component configured
-
-!!! warning
-    The `data` field for each thumbnail is deprecated and will be removed
-    in a future release.  Clients should retrieve the png directly using the
-    `relative_path` field.
 
 #### Get directory information
 Returns a list of files and subdirectories given a supplied path.
@@ -1285,9 +1330,16 @@ JSON-RPC request:
 }
 ```
 
-Returns:
-
-`ok`
+Returns: Information about the created directory
+```json
+{
+    "item": {
+        "path": "gcodes/testdir",
+        "root": "gcodes"
+    },
+    "action": "create_dir"
+}
+```
 
 #### Delete directory
 Deletes a directory at the specified path.
@@ -1312,9 +1364,16 @@ JSON-RPC request:
     If the specified directory contains files then the delete request
     will fail unless the `force` argument is set to `true`.
 
-Returns:
-
-`ok`
+Returns:  Information about the deleted directory
+```json
+{
+    "item": {
+        "path": "gcodes/testdir",
+        "root": "gcodes"
+    },
+    "action": "delete_dir"
+}
+```
 
 #### Move a file or directory
 Moves a file or directory from one location to another. The following
@@ -1351,9 +1410,22 @@ JSON-RPC request:
 }
 ```
 
-Returns:
-
-`ok`
+Returns:  Information about the moved file or directory
+```json
+{
+    "result": {
+        "item": {
+            "root": "gcodes",
+            "path": "test4/test3"
+        },
+        "source_item": {
+            "path": "gcodes/test4/test3",
+            "root": "gcodes"
+        },
+        "action": "move_dir"
+    }
+}
+```
 
 #### Copy a file or directory
 Copies a file or directory from one location to another.  A successful copy has
@@ -1378,9 +1450,16 @@ JSON-RPC request:
 }
 ```
 
-Returns:
-
-`ok`
+Returns: Information about the copied file or directory
+```json
+{
+    "item": {
+        "root": "gcodes",
+        "path": "test4/Voron_v2_350_aferburner_Filament Cover_0.2mm_ABS.gcode"
+    },
+    "action": "create_file"
+}
+```
 
 #### File download
 Retreives file `filename` at root `root`.  The `filename` must include
@@ -1439,21 +1518,16 @@ Arguments available only for the `gcodes` root:
 
 JSON-RPC request: Not Available
 
-Returns:
-
-The name of the uploaded file.
+Returns:  Information about the uploaded file.  Note that `print_started`
+is only included when the supplied root is set to `gcodes`.
 ```json
 {
-    "result": "{file_name}"
-}
-```
-
-If the supplied root is "gcodes", a "print_started" field is also
-returned.
-```json
-{
-    "result": "{file_name}",
-    "print_started": false
+    "item": {
+        "path": "Lock Body Shim 1mm_0.2mm_FLEX_MK3S_2h30m.gcode",
+        "root": "gcodes"
+    },
+    "print_started": false,
+    "action": "create_file"
 }
 ```
 
@@ -1476,9 +1550,16 @@ JSON-RPC request:
     "id": 1323
 }
 ```
-Returns:
-
-The name of the deleted file
+Returns:  Information about the deleted file
+```json
+{
+    "item": {
+        "path": "Lock Body Shim 1mm_0.2mm_FLEX_MK3S_2h30m.gcode",
+        "root": "gcodes"
+    },
+    "action": "delete_file"
+}
+```
 
 #### Download klippy.log
 HTTP request:
@@ -1512,10 +1593,15 @@ Moonraker's HTTP APIs.  JWTs should be included in the `Authorization`
 header as a `Bearer` type for each HTTP request.  If using an API Key it
 should be included in the `X-Api-Key` header for each HTTP Request.
 
+!!! note
+    For requests in which clients cannot modify headers it is acceptable
+    to pass the JWT via the query string's `access_token` argument.
+    Alternatively client developers may request a `oneshot_token` and
+    send the result via the `token` query string argument.
+
 !!! warning
-    Clients should not use the query string to pass arguments to these
-    APIs.  Arguments may be passed as part of the body either in JSON
-    format or as form-data.
+    It is strongly recommended that arguments for the below APIs are
+    passed in the request's body.
 
 #### Login User
 HTTP Request:
@@ -1613,7 +1699,12 @@ logs the user in.
     or be logged in as another user.
 
 #### Delete User
-Deletes the currently logged in user.
+Deletes a registered user.
+
+!!! note
+    A request to delete a user MUST come from an authorized source
+    other than the account to be deleted.  This can be a "trusted user",
+    the "api key user", or any other user account.
 
 HTTP Request:
 ```http
@@ -1621,17 +1712,40 @@ DELETE /access/user
 Content-Type: application/json
 
 {
-    "password": "my_password"
+    "username": "my_username"
 }
 ```
 JSON-RPC request: Not Available
 
 Returns: The username of the deleted user and an action summary.  This
-effectively logs the user out.
+effectively logs the user out, as all outstanding tokens will be invalid.
 ```json
 {
     "username": "my_user",
     "action": "user_deleted"
+}
+```
+
+#### List Available Users
+HTTP Request:
+```http
+GET /access/users/list
+```
+JSON-RPC request: Not Available
+
+Returns: A list of created users on the system
+```json
+{
+    "users": [
+        {
+            "username": "testuser",
+            "created_on": 1618771331.1685035
+        },
+        {
+            "username": "testuser2",
+            "created_on": 1620943153.0191233
+        }
+    ]
 }
 ```
 
@@ -1966,6 +2080,10 @@ and `fluidd` are present as clients configured in `moonraker.conf`
             ]
         },
         "moonraker": {
+            "type": "zip_beta",
+            "channel": "beta",
+            "need_channel_update": false,
+            "pristine": true,
             "remote_alias": "origin",
             "branch": "master",
             "owner": "Arksine",
@@ -1993,6 +2111,10 @@ and `fluidd` are present as clients configured in `moonraker.conf`
             "remote_version": "v1.10.0"
         },
         "klipper": {
+            "type": "zip_beta",
+            "channel": "beta",
+            "need_channel_update": false,
+            "pristine": true,
             "remote_alias": "origin",
             "branch": "master",
             "owner": "KevinOConnor",
@@ -2042,9 +2164,23 @@ Below is an explanation for each field:
   reported as seconds since the epoch (aka Unix Time).
 
 The `moonraker`, `klipper` packages, along with and clients configured
-as git repos have the following fields:
+as applications have the following fields:
 
-- `owner`: the owner of the repo
+- `configured_type`: the application type configured by the user
+- `detected_type`:  the applicaiton type as detected by Moonraker.
+- `channel`:  the currently configured update channel.  For Moonraker
+  and Klipper this is set in the `[update_manager]` configuration.
+  For clients the channel is determined by the configured type
+- `need_channel_update`: This will be set to `true` if Moonraker has
+  detected that a channel swap is necessary (ie: the configured type does
+  not match the detected type). The channel swap will be performed on the
+  next update.
+- `pristine`: For `zip` and `zip_beta` types this is set to `true` if an
+  applications source checksum matches the one generated  when the app was
+  built.  This value will be set to the opposite of "dirty" for git repos.
+  Note that a zip application can still be updated if the repo is not
+  pristine.
+- `owner`: the owner of the repo / application
 - `branch`: the name of the current git branch.  This should typically
     be "master".
 - `remote_alias`: the alias for the remote.  This should typically be
@@ -2055,9 +2191,14 @@ as git repos have the following fields:
 - `current_hash`: hash of the most recent commit on disk
 - `remote_hash`: hash of the most recent commit pushed to the remote
 - `is_valid`: true if installation is a valid git repo on the master branch
-    and an "origin" set to the official remote
-- `is_dirty`: true if the repo has been modified
-- `detached`: true if the repo is currently in a detached state
+    and an "origin" set to the official remote.  For `zip` and `zip_beta`
+    types this will report false if Moonraker is unable to fetch the
+    current repo state from GitHub.
+- `is_dirty`: true if the repo has been modified.  This will always be false
+  for `zip` and `zip_beta` types.
+- `detached`: true if the repo is currently in a detached state.  For `zip`
+  and `zip_beta` types it is considered detached if the local release info
+  does not match what is present on the remote.
 - `debug_enabled`: True when `enable_repo_debug` has been configured.  This
     will bypass repo validation allowing detached updates, and updates from
     a remote/branch other than than the primary (typically origin/master).
@@ -2083,6 +2224,32 @@ The `system` package has the following fields:
 - `package_count`: the number of system packages available for update
 - `package_list`: an array containing the names of packages available
   for update
+
+### Perform a full update
+Attempts to update all configured items in Moonraker.  Updates are
+performed in the following order:
+
+- `system` if enabled
+- All configured clients
+- Klipper
+- Moonraker
+
+HTTP request:
+```http
+POST /machine/update/full
+```
+JSON-RPC request:
+```json
+{
+    "jsonrpc": "2.0",
+    "method": "machine.update.full",
+    "id": 4645
+}
+```
+Returns:
+
+`ok` when complete
+
 
 #### Update Moonraker
 Pulls the most recent version of Moonraker from GitHub and restarts
@@ -2252,6 +2419,66 @@ An array of objects containing info for each configured device.
 ```
 
 #### Get Device Status
+Returns the status for a single configured device.
+
+HTTP request:
+```http
+GET /machine/device_power/device?device=green_led
+```
+JSON-RPC request:
+```json
+{
+    "jsonrpc": "2.0",
+    "method": "machine.device_power.get_device",
+    "params": {
+        "device": "green_led"
+    },
+    "id": 4564
+}
+```
+Returns:
+
+An object containing power state for the requested device:
+```json
+{
+    "green_led": "off"
+}
+```
+
+#### Set Device State
+Toggle, turn on, or turn off a specified device.
+
+HTTP request:
+```http
+POST /machine/device_power/device?device=green_led&action=on
+```
+JSON-RPC request:
+```json
+{
+    "jsonrpc": "2.0",
+    "method": "machine.device_power.post_device",
+    "params": {
+        "device": "green_led",
+        "action": "on"
+    },
+    "id": 4564
+}
+```
+
+!!! note
+    The `action` argument may be `on`, `off`, or `toggle`.  Any
+    other value will result in an error.
+
+Returns:
+
+An object containing new power state for the requested device:
+```json
+{
+    "green_led": "off"
+}
+```
+
+#### Get Batch Device Status
 Get power status for the requested devices.  At least one device must be
 specified.
 
@@ -2281,7 +2508,7 @@ An object containing power state for each requested device:
 }
 ```
 
-#### Power On Devices
+#### Batch Power On Devices
 Power on the requested devices.  At least one device must be
 specified.
 
@@ -2309,7 +2536,7 @@ An object containing power state for each requested device:
 }
 ```
 
-#### Power Off Devices
+#### Batch Power Off Devices
 Power off the requested devices.  At least one device must be
 specified.
 
@@ -2664,7 +2891,7 @@ JSON-RPC request:
     "jsonrpc": "2.0",
     "method":"server.history.get_job",
     "params":{"uid": "{uid}"},
-    "id": 4564,
+    "id": 4564
 }
 ```
 Returns:
@@ -2719,6 +2946,133 @@ An array of deleted job ids
 ]
 ```
 
+### MQTT APIs
+
+The following API is available when `[mqtt]` has been configured.
+
+!!! Note
+    These requests are not available over the `mqtt` transport as they
+    are redundant.  MQTT clients can publish and subscribe to
+    topics directly.
+
+#### Publish a topic
+
+HTTP request:
+```http
+POST /server/mqtt/publish
+Content-Type: application/json
+
+{
+    "topic": "home/test/pub",
+    "payload": "hello",
+    "qos": 0,
+    "retain": false,
+    "timeout": 5
+}
+```
+JSON-RPC request:
+```json
+{
+    "jsonrpc": "2.0",
+    "method":"server.mqtt.publish",
+    "params":{
+        "topic": "home/test/pub",
+        "payload": "hello",
+        "qos": 0,
+        "retain": false,
+        "timeout": 5
+    },
+    "id": 4564
+}
+```
+Only the `topic` parameter is required.  Below is an explanation for
+each paramater:
+
+- `topic`: The topic to publish.
+- `payload`: Payload to send with the topic.  May be a boolean, float,
+  integer, string, object, or array. All values are converted to strings prior
+  to publishing.  Objects and Arrays are JSON encoded.  If omitted an empty
+  payload is sent.
+- `qos`: QOS level to use when publishing the topic.  Must be an integer value
+  from 0 to 2.  If omitted the system configured default is used.
+- `retain`: If set to `true` the MQTT broker will retain the payload of this
+  request.  Note that only the mostly recently tagged payload is retained.
+  When other clients first subscribe to the topic they immediately recieve the
+  retained message.  The default is `false`.
+- `timeout`: A float value in seconds.  By default requests with QoS levels of
+  1 or 2 will block until the Broker acknowledges confirmation.  This option
+  applies a timeout to the request, returning a 504 error if the timeout is
+  exceeded. Note that the topic will still be published if the QoS level is 1
+  or 2.
+
+!!! tip
+    To clear a retained value of a topic, publish the topic with an empty
+    payload and `retain` set to `true`.
+
+Returns:
+
+The published topic:
+```json
+{
+    "topic": "home/test/pub"
+}
+```
+
+#### Subscribe to a topic
+
+
+HTTP request:
+```http
+POST /server/mqtt/subscribe
+Content-Type: application/json
+
+{
+    "topic": "home/test/sub",
+    "qos": 0,
+    "timeout": 5
+}
+```
+JSON-RPC request:
+```json
+{
+    "jsonrpc": "2.0",
+    "method":"server.mqtt.subscribe",
+    "params":{
+        "topic": "home/test/sub",
+        "qos": 0,
+        "timeout": 5
+    },
+    "id": 4564
+}
+```
+
+Only the `topic` parameter is required.  Below is an explanation for
+each paramater:
+
+- `topic`: The topic to subscribe.  Note that wildcards may not be used.
+- `qos`: QOS level to use when subscribing to the topic.  Must be an integer
+  value from 0 to 2.  If omitted the system configured default is used.
+- `timeout`: A float value in seconds.  By default requests will block
+  indefinitely until a response is received. This option applies a timeout to
+  the request, returning a 504 error if the timeout is exceeded.  The
+  subscription will be removed after a timeout.
+
+!!! note
+    If the topic was previously published with a retained payload this request
+    will return with the retained value.
+
+Returns:
+
+The subscribed topic and its payload:
+```json
+{
+    "topic": "home/test/pub",
+    "payload": "test"
+}
+```
+If the payload is json encodable it will be returned as an object or array.
+Otherwise it will be a string.
+
 ### Websocket notifications
 Printer generated events are sent over the websocket as JSON-RPC 2.0
 notifications.  These notifications are sent to all connected clients
@@ -2760,12 +3114,16 @@ Status Subscriptions arrive as a "notify_status_update" notification:
 {
     "jsonrpc": "2.0",
     "method": "notify_status_update",
-    "params": [{<status object>}]
+    "params": [{<status object>}, <eventtime>]
 }
 ```
 The structure of the `status object` is identical to the structure that is
 returned from an [object query's](#query-printer-object-status)
 `status` field.
+
+The `eventtime` is a timestamp generated by Klipper when
+the update was originally pushed.  This timestamp is a float value,
+relative to Klipper's monotonic clock.
 
 #### Klippy Ready
 Notify clients when Klippy has reported a ready state
@@ -2820,29 +3178,22 @@ to alert all connected clients of the change:
 }
 ```
 The `source_item` field is only present for `move_item` and
-`copy_item` actions.  The following `action` field will be set
+`copy_item` actions.  The `action` field will be set
 to one of the following values:
 
-- `upload_file`
-- `delete_file`
+- `create_file`
 - `create_dir`
+- `delete_file`
 - `delete_dir`
-- `move_item`
-- `copy_item`
+- `move_file`
+- `move_dir`
+- `modify_file`
+- `root_update`
 
-#### Metadata Update
-When a new file is uploaded via the API a websocket notification is broadcast
-to all connected clients after parsing is complete:
-```json
-{
-    "jsonrpc": "2.0",
-    "method": "notify_metadata_update",
-    "params": [{metadata}]
-}
-```
-
-Where `metadata` is an object matching that returned from a
-[gcode metadata request](#get-gcode-metadata).
+Most of the above actions are self explanatory.  The `root_update`
+notification is sent when a `root` folder has changed its location,
+for example when a user configures a different gcode file path
+in Klipper.
 
 #### Update Manager Response
 The update manager will send asyncronous messages to the client during an
@@ -2899,7 +3250,7 @@ state:
 }
 ```
 
-Where `throtled_state` is an object that matches the `throttled_state` field
+Where `throttled_state` is an object that matches the `throttled_state` field
 in the response from a [Moonraker process stats](#get-moonraker-process-stats)
 request. It is possible for clients to receive this notification multiple times
 if the system repeatedly transitions between an active and inactive throttled
@@ -2919,7 +3270,19 @@ process statistics:
             "memory": 23636,
             "mem_units": "kB"
         },
-        "cpu_temp": 44.008
+        "cpu_temp": 44.008,
+        "network": {
+            "lo": {
+                "rx_bytes": 114555457,
+                "tx_bytes": 114555457,
+                "bandwidth": 2911.49
+            },
+            "wlan0": {
+                "rx_bytes": 48773134,
+                "tx_bytes": 115035939,
+                "bandwidth": 3458.77
+            }
+        }
     }]
 }
 ```
@@ -2946,6 +3309,36 @@ a job is added or finished:
 The `action` field may be `added` or `finished`. The `job` field contains
 an object matches the one returned when requesting
 [job data](#get-a-single-job).
+
+#### Authorized User Created
+If the `[authorization]` module is enabled the following notification is
+sent when a new user is created:
+```json
+{
+    "jsonrpc": "2.0",
+    "method": "notify_user_created",
+    "params": [
+        {
+            "username": "<username>"
+        }
+    ]
+}
+```
+
+#### Authorized User Deleted
+If the `[authorization]` module is enabled the following notification is
+sent when an existing user is deleted.
+```json
+{
+    "jsonrpc": "2.0",
+    "method": "notify_user_deleted",
+    "params": [
+        {
+            "username": "<username>"
+        }
+    ]
+}
+```
 
 ### Appendix
 

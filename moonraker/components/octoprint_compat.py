@@ -3,9 +3,22 @@
 # Copyright (C) 2021 Nickolas Grigoriadis <nagrigoriadis@gmail.com>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+
+from __future__ import annotations
 import logging
 
-import utils
+# Annotation imports
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    List,
+)
+if TYPE_CHECKING:
+    from confighelper import ConfigHelper
+    from websockets import WebRequest
+    from . import klippy_apis
+    APIComp = klippy_apis.KlippyAPI
 
 OCTO_VERSION = '1.5.0'
 
@@ -23,14 +36,15 @@ class OctoprintCompat:
     * Heater temperatures
     """
 
-    def __init__(self, config):
+    def __init__(self, config: ConfigHelper) -> None:
         self.server = config.get_server()
-        self.software_version = config['system_args'].get('software_version')
+        self.software_version = self.server.get_app_args().get(
+            'software_version')
 
         # Local variables
-        self.klippy_apis = self.server.lookup_component('klippy_apis')
-        self.heaters = {}
-        self.last_print_stats = {}
+        self.klippy_apis: APIComp = self.server.lookup_component('klippy_apis')
+        self.heaters: Dict[str, Dict[str, Any]] = {}
+        self.last_print_stats: Dict[str, Any] = {}
 
         # Register status update event
         self.server.register_event_handler(
@@ -40,18 +54,22 @@ class OctoprintCompat:
 
         # Version & Server information
         self.server.register_endpoint(
-            '/api/version', ['GET'], self._get_version, wrap_result=False)
+            '/api/version', ['GET'], self._get_version,
+            transports=['http'], wrap_result=False)
         self.server.register_endpoint(
-            '/api/server', ['GET'], self._get_server, wrap_result=False)
+            '/api/server', ['GET'], self._get_server,
+            transports=['http'], wrap_result=False)
 
         # Login, User & Settings
         self.server.register_endpoint(
-            '/api/login', ['POST'], self._post_login_user, wrap_result=False)
+            '/api/login', ['POST'], self._post_login_user,
+            transports=['http'], wrap_result=False)
         self.server.register_endpoint(
             '/api/currentuser', ['GET'], self._post_login_user,
-            wrap_result=False)
+            transports=['http'], wrap_result=False)
         self.server.register_endpoint(
-            '/api/settings', ['GET'], self._get_settings, wrap_result=False)
+            '/api/settings', ['GET'], self._get_settings,
+            transports=['http'], wrap_result=False)
 
         # File operations
         # Note that file upload is handled in file_manager.py
@@ -59,50 +77,54 @@ class OctoprintCompat:
 
         # Job operations
         self.server.register_endpoint(
-            '/api/job', ['GET'], self._get_job, wrap_result=False)
+            '/api/job', ['GET'], self._get_job,
+            transports=['http'], wrap_result=False)
         # TODO: start/cancel/restart/pause jobs
 
         # Printer operations
         self.server.register_endpoint(
-            '/api/printer', ['GET'], self._get_printer, wrap_result=False)
+            '/api/printer', ['GET'], self._get_printer,
+            transports=['http'], wrap_result=False)
         self.server.register_endpoint(
             '/api/printer/command', ['POST'], self._post_command,
-            wrap_result=False)
+            transports=['http'], wrap_result=False)
         # TODO: head/tool/bed/chamber specific read/issue
 
         # Printer profiles
         self.server.register_endpoint(
             '/api/printerprofiles', ['GET'], self._get_printerprofiles,
-            wrap_result=False)
+            transports=['http'], wrap_result=False)
 
         # System
         # TODO: shutdown/reboot/restart operations
 
-    async def _init(self):
+    async def _init(self) -> None:
         self.heaters = {}
         # Fetch heaters
         try:
+            result: Dict[str, Any]
+            sensors: List[str]
             result = await self.klippy_apis.query_objects({'heaters': None})
             sensors = result.get('heaters', {}).get('available_sensors', [])
         except self.server.error as e:
             logging.info(f'Error Configuring heaters: {e}')
             sensors = []
         # subscribe objects
-        sub = {s: None for s in sensors}
+        sub: Dict[str, Any] = {s: None for s in sensors}
         sub['print_stats'] = None
         result = await self.klippy_apis.subscribe_objects(sub)
         self.last_print_stats = result.get('print_stats', {})
         if sensors:
             self.heaters = {name: result.get(name, {}) for name in sensors}
 
-    def _handle_status_update(self, status):
+    def _handle_status_update(self, status: Dict[str, Any]) -> None:
         if 'print_stats' in status:
             self.last_print_stats.update(status['print_stats'])
         for heater_name, data in self.heaters.items():
             if heater_name in status:
                 data.update(status[heater_name])
 
-    def printer_state(self):
+    def printer_state(self) -> str:
         klippy_state = self.server.get_klippy_state()
         if klippy_state in ["disconnected", "startup"]:
             return 'Offline'
@@ -115,8 +137,8 @@ class OctoprintCompat:
             'complete': 'Operational'
         }.get(self.last_print_stats.get('state', 'standby'), 'Error')
 
-    def printer_temps(self):
-        temps = {}
+    def printer_temps(self) -> Dict[str, Any]:
+        temps: Dict[str, Any] = {}
         for heater, data in self.heaters.items():
             name = 'bed'
             if heater.startswith('extruder'):
@@ -134,7 +156,9 @@ class OctoprintCompat:
             }
         return temps
 
-    async def _get_version(self, web_request):
+    async def _get_version(self,
+                           web_request: WebRequest
+                           ) -> Dict[str, str]:
         """
         Version information
         """
@@ -144,7 +168,9 @@ class OctoprintCompat:
             'text': f'OctoPrint (Moonraker {self.software_version})',
         }
 
-    async def _get_server(self, web_request):
+    async def _get_server(self,
+                          web_request: WebRequest
+                          ) -> Dict[str, Any]:
         """
         Server status
         """
@@ -155,7 +181,9 @@ class OctoprintCompat:
                 None if klippy_state == 'ready' else 'settings')
         }
 
-    async def _post_login_user(self, web_request):
+    async def _post_login_user(self,
+                               web_request: WebRequest
+                               ) -> Dict[str, Any]:
         """
         Confirm session login.
 
@@ -174,7 +202,9 @@ class OctoprintCompat:
             'groups': ['admins', 'users'],
         }
 
-    async def _get_settings(self, web_request):
+    async def _get_settings(self,
+                            web_request: WebRequest
+                            ) -> Dict[str, Any]:
         """
         Used to parse Octoprint capabilities
 
@@ -209,7 +239,9 @@ class OctoprintCompat:
             },
         }
 
-    async def _get_job(self, web_request):
+    async def _get_job(self,
+                       web_request: WebRequest
+                       ) -> Dict[str, Any]:
         """
         Get current job status
         """
@@ -230,7 +262,9 @@ class OctoprintCompat:
             'state': self.printer_state()
         }
 
-    async def _get_printer(self, web_request):
+    async def _get_printer(self,
+                           web_request: WebRequest
+                           ) -> Dict[str, Any]:
         """
         Get Printer status
         """
@@ -252,11 +286,13 @@ class OctoprintCompat:
             },
         }
 
-    async def _post_command(self, web_request):
+    async def _post_command(self,
+                            web_request: WebRequest
+                            ) -> Dict:
         """
         Request to run some gcode command
         """
-        commands = web_request.get('commands', [])
+        commands: List[str] = web_request.get('commands', [])
         for command in commands:
             logging.info(f'Executing GCode: {command}')
             try:
@@ -267,7 +303,9 @@ class OctoprintCompat:
 
         return {}
 
-    async def _get_printerprofiles(self, web_request):
+    async def _get_printerprofiles(self,
+                                   web_request: WebRequest
+                                   ) -> Dict[str, Any]:
         """
         Get Printer profiles
         """
@@ -287,5 +325,5 @@ class OctoprintCompat:
         }
 
 
-def load_component(config):
+def load_component(config: ConfigHelper) -> OctoprintCompat:
     return OctoprintCompat(config)
